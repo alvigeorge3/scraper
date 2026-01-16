@@ -57,15 +57,15 @@ class Database:
 
                 record = {
                     "platform": row.get("platform") or platform or row.get("Platform", "Unknown"),
-                    "category": row.get("Category", "Unknown"),
-                    "name": row.get("Item Name", "Unknown"),
-                    "price": clean_num(price),
-                    "mrp": clean_num(mrp),
-                    "weight": row.get("Weight", None),
-                    "eta": row.get("Delivery ETA", None),
-                    "availability": row.get("Availability", None),
-                    "image_url": row.get("Image", None),
-                    "product_url": row.get("URL", None),
+                    "category": row.get("category") or row.get("Category", "Unknown"),
+                    "name": row.get("name") or row.get("Item Name", "Unknown"),
+                    "price": clean_num(row.get("price") or row.get("Selling Price")),
+                    "mrp": clean_num(row.get("mrp") or row.get("Mrp")),
+                    "weight": row.get("weight") or row.get("Weight", None),
+                    "eta": row.get("eta") or row.get("Delivery ETA", None),
+                    "availability": row.get("availability") or row.get("Availability", None),
+                    "image_url": row.get("image_url") or row.get("Image", None),
+                    "product_url": row.get("product_url") or row.get("URL", None),
                     # "scraped_at": handled by default now() in DB or we can send it
                 }
                 

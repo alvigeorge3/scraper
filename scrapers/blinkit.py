@@ -4,7 +4,9 @@ import logging
 import json
 import re
 import time
+from typing import List
 from .base import BaseScraper
+from .models import ProductItem, AvailabilityResult
 from playwright.async_api import TimeoutError
 
 logger = logging.getLogger(__name__)
@@ -34,21 +36,16 @@ class BlinkitScraper(BaseScraper):
             # 1. Trigger Location Modal
             logger.info("Clicking location trigger...")
             try:
-                # Wait for main trigger to be visible (using CSS only for robustness in wait_for_selector)
                 trigger_selector = "div[class*='LocationBar__']"
                 try:
                     await self.page.wait_for_selector(trigger_selector, timeout=5000)
-                except:
-                    pass # Proceed to attempt clicks anyway
+                except: pass
 
-                
-                # Attempt click strategies
                 if await self.page.is_visible("div[class*='LocationBar__']"):
                     await self.page.click("div[class*='LocationBar__']")
                 elif await self.page.is_visible("text=Delivery in"):
                     await self.page.click("text=Delivery in")
                 else:
-                    # Final fallback
                     await self.page.click("header div[class*='Container']")
             except Exception as e:
                 logger.warning(f"Trigger click failed: {e}")
@@ -68,153 +65,186 @@ class BlinkitScraper(BaseScraper):
                 await self.page.wait_for_selector(suggestion_selector, timeout=10000)
                 await self.page.click(suggestion_selector)
                 
-                # Wait for location update
-                # Instead of fixed sleep, wait for modal to close or ETA to appear
                 await self.page.wait_for_selector(modal_input, state="hidden", timeout=5000)
-                await self.page.wait_for_timeout(2000) # Small buffer for hydration
+                await self.page.wait_for_timeout(2000)
             except Exception as e:
                 logger.warning(f"Location input interaction failed: {e}")
             
             # 4. Extract Delivery ETA
-            try:
-                # Look for "Delivery in X minutes" in LocationBar__Title...
                 eta_el = await self.page.query_selector("div[class*='LocationBar__Title']")
                 if eta_el:
                     text = await eta_el.inner_text()
-                    # e.g. "Delivery in 13 minutes"
+                    logger.info(f"Raw ETA Text: '{text}'")
                     match = re.search(r'(\d+\s*minutes?|mins?)', text, re.IGNORECASE)
                     if match:
                         self.delivery_eta = match.group(1).lower()
                         logger.info(f"Captured Delivery ETA: {self.delivery_eta}")
                     else:
-                        # Fallback scan
-                        self.delivery_eta = text # Capture full text if regex fails? No, keep N/A logic
-                        logger.info(f"ETA text found but regex failed: {text}")
+                        logger.warning(f"ETA regex mismatch. Keeping: {self.delivery_eta}")
+                else:
+                    logger.warning("ETA Element not found")
             except Exception as e:
                 logger.warning(f"Could not extract ETA: {e}")
                 
             logger.info("Location set successfully")
             
-            # Debug: Save page source
-            content = await self.page.content()
-            with open("debug_blinkit_location.html", "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info("Saved debug_blinkit_location.html")
-            
         except Exception as e:
             logger.error(f"Error setting location: {e}")
-            await self.page.screenshot(path="error_blinkit_location.png")
-            content = await self.page.content()
-            with open("debug_blinkit_location.html", "w", encoding="utf-8") as f:
-                f.write(content)
+            try:
+                await self.page.screenshot(path="error_blinkit_location.png")
+            except: pass
 
-    async def scrape_assortment(self, category_url: str):
+    async def scrape_assortment(self, category_url: str) -> List[ProductItem]:
         logger.info(f"Scraping assortment from {category_url}")
-        results = []
+        results: List[ProductItem] = []
         
         try:
-            # Navigate
-            response = await self.page.goto(category_url, timeout=60000, wait_until="domcontentloaded")
-            
-            # Smart Navigation Handling (Redirects/404)
-            # Blinkit often redirects to valid category pages, but if it goes to homepage, we need to know.
+             # Smart Nav Check
+            await self.page.goto(category_url, timeout=60000, wait_until="domcontentloaded")
             if self.page.url == self.base_url and "cid" in category_url:
-                 logger.warning(f"Redirected to homepage. Category URL {category_url} might be invalid/session-bound.")
-                 # Implement Smart Nav here if needed (omitted for first pass, similar to Zepto)
+                 logger.warning(f"Redirected to homepage. Category URL {category_url} might be invalid.")
+                 # (Optional: Implement Smart Nav here)
 
-            await self.page.wait_for_timeout(3000) # Reduced hydration wait
+            await self.page.wait_for_timeout(3000)
 
             # 1. JSON Data Extraction Strategy (Primary)
-            # We found that products start with {"product_id":...
-            # We will use the robust JSONDecoder to parse them from the full content
-            # We will use the robust JSONDecoder to parse them from the full content
             content = await self.page.content()
-            with open("debug_blinkit_source.html", "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info("Saved debug_blinkit_source.html")
-            
             normalized_content = content.replace(r'\"', '"').replace(r'\\', '\\')
             
-            import json
-            import re
-            
             products_map = {}
-            seen_ids = set()
             
             # Regex to find potential starts of JSON objects
             start_pattern = re.compile(r'\{"product_id":')
-            
             decoder = json.JSONDecoder()
             
             for match in start_pattern.finditer(normalized_content):
                 try:
-                    # Attempt to decode a valid JSON object starting at this position
                     p_data, _ = decoder.raw_decode(normalized_content, match.start())
                     
                     if isinstance(p_data, dict) and p_data.get('product_id'):
                         pid = str(p_data['product_id'])
-                        
-                        # Store/Update map. 
-                        # We prefer objects that have price/inventory info
                         if pid not in products_map:
                             products_map[pid] = p_data
-                        else:
-                            # Merge logic if needed (e.g. prefer non-null inventory)
-                            pass
-                            
                 except Exception as e:
                     continue
 
             logger.info(f"Extracted {len(products_map)} unique products from JSON")
             
-            # Convert map to results
             timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             
-            if products_map:
-                for pid, p in products_map.items():
-                    try:
-                        name = p.get('product_name') or p.get('display_name') or "Unknown"
-                        
-                        item = {
-                            "Category": "Vegetables",
-                            "Subcategory": "All",
-                            "Item Name": name,
-                            "Brand": p.get('brand') or "Unknown",
-                            "Mrp": p.get('mrp') if p.get('mrp') else "N/A", 
-                            "Selling Price": p.get('price') if p.get('price') else "N/A",
-                            "Weight": p.get('unit') or p.get('quantity_info') or "N/A",
-                            "Delivery ETA": self.delivery_eta, 
-                            "Availability": "Out of Stock" if p.get('unavailable_quantity') == 1 or p.get('inventory') == 0 else "In Stock",
-                            "Inventory": p.get('inventory') if 'inventory' in p else "Unknown",
-                            "Store ID": p.get('merchant_id') or "Unknown",
-                            "Base Product ID": pid, 
-                            "Shelf Life": "N/A", # Not usually in this object
-                            "Timestamp": timestamp,
-                            "Pincode": "560001",
-                            "Clicked Label": "Direct/Smart",
-                            "URL": f"{self.base_url}prn/{name.lower().replace(' ', '-')}/prid/{pid}",
-                            "Image": p.get('image_url') or "N/A"
-                        }
-                        results.append(item)
-                    except Exception as e:
-                        logger.warning(f"Skipping product {pid}: {e}")
-                        continue
-                        
-                return results
-
-            # Fallback to DOM if JSON extraction failed
-            logger.warning("JSON extraction empty, trying DOM...")
-            if not results:
-                 # Implement DOM fallback if needed, but JSON should work given the debug info
-                 pass
+            for pid, p in products_map.items():
+                try:
+                    name = p.get('product_name') or p.get('display_name') or "Unknown"
+                    is_unavailable = p.get('unavailable_quantity') == 1 or p.get('inventory') == 0
+                    
+                    item: ProductItem = {
+                        "platform": "blinkit",
+                        "category": "Vegetables",
+                        "name": name,
+                        "brand": p.get('brand') or "Unknown",
+                        "mrp": float(p.get('mrp', 0)),
+                        "price": float(p.get('price', 0)),
+                        "weight": p.get('unit') or p.get('quantity_info') or "N/A",
+                        "eta": self.delivery_eta, 
+                        "availability": "Out of Stock" if is_unavailable else "In Stock",
+                        "store_id": str(p.get('merchant_id') or "Unknown"),
+                        "product_url": f"{self.base_url}prn/{name.lower().replace(' ', '-')}/prid/{pid}",
+                        "image_url": p.get('image_url') or "N/A",
+                        "scraped_at": timestamp
+                    }
+                    results.append(item)
+                except Exception as e:
+                    logger.warning(f"Skipping product {pid}: {e}")
+                    continue
 
         except Exception as e:
             logger.error(f"Error scraping assortment: {e}")
             await self.page.screenshot(path="error_blinkit_assortment.png")
             
-        logger.info(f"Total extracted: {len(results)}")
         return results
 
-    async def scrape_availability(self, product_url: str):
-        # Placeholder
-        return {"url": product_url, "status": "Unknown"}
+    async def scrape_availability(self, product_url: str) -> AvailabilityResult:
+        logger.info(f"Scraping availability from {product_url}")
+        
+        result: AvailabilityResult = {
+             "input_pincode": "",
+             "url": product_url,
+             "platform": "blinkit",
+             "name": "N/A",
+             "price": 0.0,
+             "mrp": 0.0,
+             "availability": "Unknown",
+             "scraped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "error": None
+        }
+        
+        try:
+            await self.page.goto(product_url, timeout=60000, wait_until="domcontentloaded")
+            
+            # Blinkit PDPs also usually have the hydration JSON
+            content = await self.page.content()
+            
+            if "Something went wrong" in content or "Not Found" in content: # Generic error check
+                 # Blinkit specific 404 check
+                 pass
+
+            # JSON Strategy
+            normalized_content = content.replace(r'\"', '"').replace(r'\\', '\\')
+            start_pattern = re.compile(r'\{"product_id":')
+            decoder = json.JSONDecoder()
+            
+            candidates = []
+            
+            for match in start_pattern.finditer(normalized_content):
+                try:
+                    p_data, _ = decoder.raw_decode(normalized_content, match.start())
+                    if isinstance(p_data, dict) and p_data.get('product_id'):
+                        candidates.append(p_data)
+                except:
+                    continue
+            
+            # Check for ID in URL
+            # URL format: .../prid/{pid}
+            url_id_match = re.search(r'prid/(\d+)', product_url)
+            target_data = None
+            
+            if url_id_match:
+                tid = url_id_match.group(1)
+                target_data = next((c for c in candidates if str(c.get('product_id')) == tid), None)
+            
+            if not target_data and candidates:
+                 # Prefer longest object or match name?
+                 # Usually the main product is the first or largest
+                 candidates.sort(key=lambda x: len(str(x)), reverse=True)
+                 target_data = candidates[0]
+            
+            if target_data:
+                result["name"] = target_data.get('product_name') or target_data.get('display_name') or "N/A"
+                result["price"] = float(target_data.get('price', 0))
+                result["mrp"] = float(target_data.get('mrp', 0))
+                
+                is_unavailable = target_data.get('unavailable_quantity') == 1 or target_data.get('inventory') == 0
+                result["availability"] = "Out of Stock" if is_unavailable else "In Stock"
+            else:
+                # DOM Fallback
+                try:
+                    name_el = await self.page.query_selector("h1")
+                    if name_el: result["name"] = await name_el.inner_text()
+                    
+                    price_el = await self.page.query_selector("div[class*='ProductPrice']") # Approx selector
+                    if price_el: 
+                        pt = await price_el.inner_text()
+                        result["price"] = float(pt.replace('₹', '').strip())
+                except: pass
+                
+                if result["availability"] == "Unknown":
+                    if "Out of Stock" in content or "Sold Out" in content:
+                        result["availability"] = "Out of Stock"
+                    else:
+                        result["availability"] = "In Stock" # Assumption if page loads and no out of stock msg
+
+        except Exception as e:
+            logger.error(f"Error scraping availability: {e}")
+            result["error"] = str(e)
+            
+        return result

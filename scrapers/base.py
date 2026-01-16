@@ -2,6 +2,8 @@ import asyncio
 from playwright.async_api import async_playwright, Page, BrowserContext
 from abc import ABC, abstractmethod
 import logging
+from typing import List, Dict, Any
+from .models import ProductItem, AvailabilityResult
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,9 +56,9 @@ class BaseScraper(ABC):
         pass
 
     @abstractmethod
-    async def scrape_assortment(self, category_url: str):
+    async def scrape_assortment(self, category_url: str) -> List[ProductItem]:
         pass
 
     @abstractmethod
-    async def scrape_availability(self, product_url: str):
+    async def scrape_availability(self, product_url: str) -> AvailabilityResult:
         pass

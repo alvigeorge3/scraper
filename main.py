@@ -86,10 +86,15 @@ async def run_availability(input_file: str, default_pincode: str, output_file: s
             try:
                 await scraper.start()
                 await scraper.set_location(pincode)
+                # scraper.scrape_availability now returns AvailabilityResult (a dict)
                 data = await scraper.scrape_availability(url)
+                
+                # Enrich with input data
                 data['input_pincode'] = pincode
-                d_lower = url.lower()
-                data['platform'] = "blinkit" if "blinkit" in d_lower else "zepto" if "zepto" in d_lower else "instamart"
+                if 'platform' not in data or data['platform'] == 'blinkit': # Blinkit fallback handling if needed
+                     d_lower = url.lower()
+                     data['platform'] = "blinkit" if "blinkit" in d_lower else "zepto" if "zepto" in d_lower else "instamart"
+                
                 return data
             except Exception as e:
                 logger.error(f"Error processing {url}: {e}")
