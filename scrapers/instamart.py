@@ -20,47 +20,103 @@ class InstamartScraper(BaseScraper):
         try:
             # Swiggy/Instamart specific location flow
             await self.page.goto(self.base_url, timeout=60000, wait_until='domcontentloaded')
-            
+            await self.page.wait_for_timeout(5000) # Wait for splash to settle
+
+            # Debug: Snapshot initial state
+            await self.page.screenshot(path="debug_instamart_initial.png")
+            visible_text = await self.page.evaluate("document.body.innerText")
+            logger.info(f"Page Text Summary: {visible_text[:500].replace(chr(10), ' ')}")
+
+            # Debug: Analyze interactive elements
+            logger.info("Analyzing UI elements...")
+            elements = await self.page.evaluate('''() => {
+                const els = Array.from(document.querySelectorAll('button, a, span[role="button"]'));
+                return els.map(e => ({
+                    tag: e.tagName, 
+                    text: e.innerText.slice(0, 50).replace(/\\n/g, ' '), 
+                    aria: e.getAttribute('aria-label') || '',
+                    class: e.className
+                })).filter(e => e.text.length > 0 || e.aria.length > 0).slice(0, 20);
+            }''')
+            logger.info(f"UI Candidates: {json.dumps(elements, indent=2)}")
+
             # 1. Trigger Location Modal
             logger.info("Clicking location trigger...")
             try:
-                # Try locating the header location bar
-                await self.page.click("div[data-testid='header-location-container'], span:has-text('Setup your location'), span:has-text('Other'), span:has-text('Location')", timeout=5000)
-            except:
-                pass
+                # Broad triggers based on common patterns
+                triggers = [
+                    "div[data-testid='header-location-container']",
+                    "span:has-text('Setup your location')",
+                    "span:has-text('Other')",
+                    "span:has-text('Location')",
+                    "button:has-text('Locate Me')",
+                    "div[class*='LocationHeader']",
+                    "a:has-text('Bangalore')",
+                    "a:has-text('Bengaluru')",
+                    "a:has-text('Delhi')",
+                    "a:has-text('Mumbai')"
+                ]
+                for t in triggers:
+                    try:
+                        if await self.page.is_visible(t):
+                            logger.info(f"Found trigger: {t}")
+                            await self.page.click(t, timeout=2000)
+                            await self.page.wait_for_timeout(1000)
+                            break
+                    except: continue
+            except Exception as e:
+                logger.error(f"Click trigger failed: {e}")
+                await self.page.screenshot(path="debug_instamart_trigger_fail.png")
 
             # 2. Type pincode
             logger.info("Typing pincode...")
             
             # Debug: Search input detection
-            search_inputs = ["input[placeholder*='Search for area']", "input[name='location']", "input[type='text']"]
+            search_inputs = [
+                "input[placeholder*='Search for area']", 
+                "input[name='location']", 
+                "input[type='text']",
+                "input[data-testid='search-input']",
+                "input[class*='SearchInput']",
+                "input[placeholder*='Enter location']"
+            ]
             search_input = None
             for s in search_inputs:
                 try:
-                    await self.page.wait_for_selector(s, timeout=3000)
+                    await self.page.wait_for_selector(s, timeout=2000)
                     search_input = s
                     break
                 except:
                     continue
             
             if not search_input:
-                logger.error("Could not find search input. Dumping generic HTML...")
+                logger.error("Could not find search input. Checking for inputs via evaluation...")
+                # Fallback: Find any visible input in the modal
                 try:
-                    content = await self.page.content()
-                    logger.info(content[:1000])
-                    inputs = await self.page.query_selector_all('input')
-                    for i in inputs:
-                         outer = await i.evaluate("el => el.outerHTML")
-                         logger.info(f"Input found: {outer}")
+                     search_input = await self.page.evaluate('''() => {
+                        const inputs = Array.from(document.querySelectorAll('input'));
+                        const visible = inputs.find(i => i.offsetParent !== null && i.type === 'text');
+                        return visible ? 'input[class="' + visible.className + '"]' : null;
+                     }''')
                 except:
                     pass
-                raise Exception("Search input not found")
+
+            if not search_input:
+                logger.error("Could not find search input. Saving debug_location_modal.html...")
+                try:
+                    content = await self.page.content()
+                    with open("debug_location_modal.html", "w", encoding="utf-8") as f:
+                        f.write(content)
+                except:
+                    pass
+                logger.warning("Search input not found. Proceeding without location (ETA will be N/A).")
+                return # Soft fail to allow JSON-LD scraping to succeed
 
             await self.page.fill(search_input, pincode)
             
             # 3. Wait for suggestions
             logger.info("Waiting for suggestions...")
-            suggestion = "div[data-testid='location-search-result'], div[class*='SearchResults'] div"
+            suggestion = "div[data-testid='location-search-result'], div[class*='SearchResults'] div, div[role='button']"
             await self.page.wait_for_selector(suggestion, timeout=10000)
             
             # Click first

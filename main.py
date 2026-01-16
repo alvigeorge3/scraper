@@ -127,4 +127,4 @@ if __name__ == "__main__":
         else:
             asyncio.run(run_assortment(args.platform, args.url, args.pincode, args.output))
     else:
-        asyncio.run(run_availability(args.input, args.pincode))
+        asyncio.run(run_availability(args.input, args.pincode, args.output))
