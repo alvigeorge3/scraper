@@ -139,8 +139,41 @@ class InstamartScraper(BaseScraper):
             logger.info("Location set successfully")
             
         except Exception as e:
-            logger.error(f"Error setting location: {e}")
             await self.page.screenshot(path="error_instamart_location.png")
+
+    async def scrape_delivery_eta(self):
+        try:
+            # Strategies to find ETA:
+            # 1. Header Global ETA
+            # 2. "Delivery in X mins" aria-label on product cards (fallback)
+            
+            selectors = [
+                "div[data-testid='header-delivery-eta']",
+                "span[data-testid='eta-container']",
+                "div[class*='DeliveryTime']",
+                "div[aria-label*='Delivery in']" # Fallback: Product card ETA like "Delivery in 4 MINS"
+            ]
+            
+            for sel in selectors:
+                try:
+                    if await self.page.is_visible(sel):
+                        text = await self.page.inner_text(sel)
+                        # If finding via aria-label, get the attribute instead
+                        if "aria-label" in sel or (await self.page.get_attribute(sel, "aria-label")):
+                             val = await self.page.get_attribute(sel, "aria-label")
+                             if val: text = val
+                        
+                        # Extract "X mins"
+                        match = re.search(r'(\d+\s*mins?)', text, re.IGNORECASE)
+                        if match:
+                            return match.group(1).lower()
+                except:
+                    continue
+            
+            return "N/A"
+        except Exception as e:
+            logger.error(f"Error extracting ETA: {e}")
+            return "N/A"
 
     async def scrape_assortment(self, category_url: str):
         logger.info(f"Scraping assortment from {category_url}")
@@ -155,6 +188,10 @@ class InstamartScraper(BaseScraper):
             with open("debug_instamart_source.html", "w", encoding="utf-8") as f:
                 f.write(content)
             logger.info("Saved debug_instamart_source.html")
+            
+            # Scrape ETA using the new robust method
+            self.delivery_eta = await self.scrape_delivery_eta()
+            logger.info(f"Scraped Assortment ETA: {self.delivery_eta}")
             
             # Continue with attempted extraction
             results = []

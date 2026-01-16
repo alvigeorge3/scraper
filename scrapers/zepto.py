@@ -74,17 +74,35 @@ class ZeptoScraper(BaseScraper):
             
             # 4. Extract ETA
             try:
-                # Zepto header usually has "12 mins"
-                header_text = await self.page.inner_text("header")
-                import re
-                match = re.search(r'(\d+\s*mins?)', header_text, re.IGNORECASE)
-                if match:
-                    self.delivery_eta = match.group(1)
-                    logger.info(f"Captured Zepto ETA: {self.delivery_eta}")
+                # Use robust testid selector found in analysis
+                eta_selector = '[data-testid="delivery-time"]'
+                if await self.page.is_visible(eta_selector):
+                    eta_text = await self.page.inner_text(eta_selector)
+                    import re
+                    match = re.search(r'(\d+\s*mins?)', eta_text, re.IGNORECASE)
+                    if match:
+                        self.delivery_eta = match.group(1).lower()
+                        logger.info(f"Captured Zepto ETA: {self.delivery_eta}")
+                    else:
+                         logger.warning(f"ETA element found but text '{eta_text}' mismatch regex")
+                else:
+                    logger.warning(f"ETA selector {eta_selector} not visible")
+                    
+                    # Fallback to header text scan
+                    header_text = await self.page.inner_text("header")
+                    match = re.search(r'(\d+\s*mins?)', header_text, re.IGNORECASE)
+                    if match:
+                         self.delivery_eta = match.group(1)
             except Exception as e:
                 logger.warning(f"Could not capture Zepto ETA: {e}")
 
             logger.info("Location set successfully")
+            
+            # Debug: Save page source after location set
+            content = await self.page.content()
+            with open("debug_zepto_location.html", "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Saved debug_zepto_location.html")
 
         except Exception as e:
             logger.error(f"Error setting location: {e}")
@@ -136,6 +154,10 @@ class ZeptoScraper(BaseScraper):
             # 1. JSON Data Extraction (for IDs, Brand, optional metadata)
             json_products_map = {} # Name -> JSON Data
             content = await self.page.content()
+            with open("debug_zepto_source.html", "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Saved debug_zepto_source.html")
+            
             normalized_content = content.replace(r'\"', '"').replace(r'\\', '\\')
             
             import json
@@ -227,30 +249,138 @@ class ZeptoScraper(BaseScraper):
 
     async def scrape_availability(self, product_url: str):
         logger.info(f"Checking availability for {product_url}")
-        result = {"url": product_url, "status": "Unknown"}
+        
+        # Default result structure
+        result = {
+            "url": product_url, 
+            "status": "Unknown",
+            "name": "N/A",
+            "brand": "N/A",
+            "price": "N/A",
+            "mrp": "N/A",
+            "weight": "N/A",
+            "image": "N/A",
+            "shelf_life": "N/A",
+            "country_of_origin": "N/A"
+        }
+        
         try:
-            await self.page.goto(product_url)
-            await self.page.wait_for_selector('h1, h5', timeout=5000) # Wait for header
-            
-            # Zepto logic
-            # Look for "ADD" button or "Out of Stock"
-            content = await self.page.content()
-            if "Sold Out" in content or "Notify Me" in content:
-                result["status"] = "Out of Stock"
-            else:
-                result["status"] = "In Stock"
-                
-            # Price
+            await self.page.goto(product_url, timeout=60000, wait_until='domcontentloaded')
+            # Wait for meaningful content
             try:
-                 # Generic price finder for now
-                price_el = await self.page.query_selector('[data-testid="product-price"]')
-                if not price_el:
-                     price_el = await self.page.query_selector('h4') # Sometimes price is h4
-                result["price"] = await price_el.inner_text() if price_el else "N/A"
+                await self.page.wait_for_selector('h1', timeout=10000)
             except:
-                pass
+                logger.warning("Timeout waiting for h1, checking 404...")
+            
+            content = await self.page.content()
+            
+            # Check 404/Error
+            if "page you’re looking for" in content:
+                result["status"] = "Not Found"
+                return result
+
+            # --- Hybrid Extraction Strategy ---
+            
+            # 1. JSON Extraction (Preferred for Metadata)
+            import json
+            import re
+            
+            extracted_json = None
+            try:
+                # Look for Zepto's hydrating JSON objects
+                start_pattern = re.compile(r'\{"id":"[a-f0-9\-]{36}"')
+                normalized_content = content.replace(r'\"', '"').replace(r'\\', '\\')
+                
+                # Scan for the product that matches the URL (using ID or Name similarity)
+                # Or just grab the first main product object if it's a PDP
+                
+                # Heuristic: The main product usually has a long description or high detail
+                decoder = json.JSONDecoder()
+                candidates = []
+                
+                for match in start_pattern.finditer(normalized_content):
+                    try:
+                        p_data, _ = decoder.raw_decode(normalized_content, match.start())
+                        if isinstance(p_data, dict) and p_data.get('id') and p_data.get('name'):
+                            candidates.append(p_data)
+                    except:
+                        continue
+                        
+                # Filter candidates to find the one matching the page
+                # For now, if we are on a PDP, the most detailed object is likely the product
+                # We can also check if the product ID is in the URL (if URL has ID)
+                
+                # Check URL for ID
+                url_id_match = re.search(r'pvid/([a-f0-9\-]{36})', product_url)
+                if url_id_match:
+                    target_id = url_id_match.group(1)
+                    extracted_json = next((c for c in candidates if c.get('id') == target_id), None)
+                
+                if not extracted_json and candidates:
+                    # Fallback: Pick the one with the longest description or most fields
+                     candidates.sort(key=lambda x: len(str(x)), reverse=True)
+                     extracted_json = candidates[0]
+
+                if extracted_json:
+                    logger.info(f"Extracted JSON for {extracted_json.get('name')}")
+                    result["name"] = extracted_json.get("name")
+                    result["brand"] = extracted_json.get("brand") or extracted_json.get("brandName") or "Unknown"
+                    result["price"] = extracted_json.get("sellingPrice") / 100 if extracted_json.get("sellingPrice") else "N/A"
+                    result["mrp"] = extracted_json.get("mrp") / 100 if extracted_json.get("mrp") else "N/A"
+                    result["weight"] = extracted_json.get("packsize") or extracted_json.get("weight") or "N/A"
+                    result["shelf_life"] = f"{extracted_json.get('shelfLifeInHours')} hours" if extracted_json.get('shelfLifeInHours') else "N/A"
+                    result["country_of_origin"] = extracted_json.get("countryOfOrigin") or "N/A"
+                    
+                    # Images
+                    if extracted_json.get("images") and len(extracted_json["images"]) > 0:
+                         path = extracted_json["images"][0].get("path")
+                         if path:
+                             result["image"] = f"https://cdn.zeptonow.com/production///{path}"
+                    
+                    # Inventory
+                    if extracted_json.get("isSoldOut"):
+                        result["status"] = "Out of Stock"
+                    else:
+                        result["status"] = "In Stock"
+
+            except Exception as e:
+                logger.warning(f"JSON extraction failed in availability: {e}")
+
+            # 2. DOM Fallback (Fill in missing fields)
+            if result["name"] == "N/A":
+                try:
+                    el = await self.page.query_selector("h1")
+                    if el: result["name"] = await el.inner_text()
+                except: pass
+                
+            if result["price"] == "N/A":
+                try:
+                    el = await self.page.query_selector('[data-testid="product-price"]')
+                    if el: result["price"] = await el.inner_text()
+                except: pass
+                
+            if result["image"] == "N/A":
+                try:
+                    el = await self.page.query_selector('img[alt="' + result.get("name", "") + '"]')
+                    if el: result["image"] = await el.get_attribute("src")
+                except: pass
+            
+            # Status check via DOM if JSON didn't determine it
+            if result["status"] == "Unknown":
+                if "Sold Out" in content or "Notify Me" in content:
+                    result["status"] = "Out of Stock"
+                else:
+                    result["status"] = "In Stock"
+            
+            # Debug: Save output to verify
+            await self.page.screenshot(path="debug_zepto_availability.png")
+            with open("debug_zepto_availability.html", "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Saved debug_zepto_availability.png and .html")
 
         except Exception as e:
             logger.error(f"Error checking availability: {e}")
+            await self.page.screenshot(path="error_zepto_availability.png")
             result["status"] = "Error"
+            
         return result
