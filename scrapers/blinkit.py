@@ -15,6 +15,17 @@ class BlinkitScraper(BaseScraper):
         self.base_url = "https://blinkit.com/"
         self.delivery_eta = "N/A"
 
+    async def start(self):
+        await super().start()
+        # Resource blocking for performance
+        await self.page.route("**/*", self._handle_route)
+
+    async def _handle_route(self, route):
+        if route.request.resource_type in ["image", "media", "font"]:
+            await route.abort()
+        else:
+            await route.continue_()
+
     async def set_location(self, pincode: str):
         logger.info(f"Setting location to {pincode}")
         try:
@@ -23,37 +34,46 @@ class BlinkitScraper(BaseScraper):
             # 1. Trigger Location Modal
             logger.info("Clicking location trigger...")
             try:
-                # Use robust class selectors found in debug HTML
-                # Class: LocationBar__Container... or LocationBar__EtaContainer...
-                await self.page.click("div[class*='LocationBar__']", timeout=5000)
-            except:
+                # Wait for main trigger to be visible (using CSS only for robustness in wait_for_selector)
+                trigger_selector = "div[class*='LocationBar__']"
                 try:
-                     await self.page.click("text=Delivery in", timeout=2000)
+                    await self.page.wait_for_selector(trigger_selector, timeout=5000)
                 except:
-                     try:
-                        await self.page.click("text=Detecting location", timeout=2000)
-                     except:
-                        # Final fallback
-                        await self.page.click("header div[class*='Container']", timeout=2000)
+                    pass # Proceed to attempt clicks anyway
 
-            # Wait for modal
-            await self.page.wait_for_timeout(2000) 
+                
+                # Attempt click strategies
+                if await self.page.is_visible("div[class*='LocationBar__']"):
+                    await self.page.click("div[class*='LocationBar__']")
+                elif await self.page.is_visible("text=Delivery in"):
+                    await self.page.click("text=Delivery in")
+                else:
+                    # Final fallback
+                    await self.page.click("header div[class*='Container']")
+            except Exception as e:
+                logger.warning(f"Trigger click failed: {e}")
+
+            # Wait for modal with smart wait
+            modal_input = "input[name='search'], input[placeholder*='search']"
+            await self.page.wait_for_selector(modal_input, state="visible", timeout=5000)
             
             # 2. Type pincode
             logger.info("Typing pincode...")
             try:
-                # Search input inside modal
-                await self.page.fill("input[name='search'], input[placeholder*='search']", pincode)
+                await self.page.fill(modal_input, pincode)
                 
                 # 3. Wait for and click result
                 logger.info("Waiting for suggestions...")
-                # Result items usually have specific class or just text matching pincode
-                await self.page.click(f"div[class*='LocationSearchList'] div:has-text('{pincode}')", timeout=10000)
+                suggestion_selector = f"div[class*='LocationSearchList'] div:has-text('{pincode}')"
+                await self.page.wait_for_selector(suggestion_selector, timeout=10000)
+                await self.page.click(suggestion_selector)
                 
                 # Wait for location update
-                await self.page.wait_for_timeout(5000)
+                # Instead of fixed sleep, wait for modal to close or ETA to appear
+                await self.page.wait_for_selector(modal_input, state="hidden", timeout=5000)
+                await self.page.wait_for_timeout(2000) # Small buffer for hydration
             except Exception as e:
-                logger.warning(f"Location input interaction failed: {e} - proceeding, maybe location already set?")
+                logger.warning(f"Location input interaction failed: {e}")
             
             # 4. Extract Delivery ETA
             try:
@@ -102,7 +122,7 @@ class BlinkitScraper(BaseScraper):
                  logger.warning(f"Redirected to homepage. Category URL {category_url} might be invalid/session-bound.")
                  # Implement Smart Nav here if needed (omitted for first pass, similar to Zepto)
 
-            await self.page.wait_for_timeout(5000) # Wait for hydration
+            await self.page.wait_for_timeout(3000) # Reduced hydration wait
 
             # 1. JSON Data Extraction Strategy (Primary)
             # We found that products start with {"product_id":...

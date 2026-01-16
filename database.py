@@ -3,6 +3,9 @@ import os
 import pandas as pd
 from supabase import create_client, Client
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 

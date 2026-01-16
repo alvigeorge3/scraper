@@ -16,14 +16,16 @@ logger = logging.getLogger(__name__)
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-async def run_assortment(platform: str, url: str, pincode: str, output_file: str = None):
+
+
+async def run_assortment(platform: str, url: str, pincode: str, output_file: str = None, headless: bool = False):
     scraper = None
     if platform == 'blinkit':
-        scraper = BlinkitScraper(headless=False)
+        scraper = BlinkitScraper(headless=headless)
     elif platform == 'zepto':
-        scraper = ZeptoScraper(headless=False)
+        scraper = ZeptoScraper(headless=headless)
     elif platform == 'instamart':
-        scraper = InstamartScraper(headless=False)
+        scraper = InstamartScraper(headless=headless)
     else:
         logger.error("Unknown platform")
         return
@@ -126,6 +128,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--workers", type=int, default=1, help="Number of concurrent workers for availability check")
     parser.add_argument("--output", help="Output CSV filename")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
     
     args = parser.parse_args()
     
@@ -133,6 +136,6 @@ if __name__ == "__main__":
         if not args.platform or not args.url:
             print("Platform and URL required for assortment")
         else:
-            asyncio.run(run_assortment(args.platform, args.url, args.pincode, args.output))
+            asyncio.run(run_assortment(args.platform, args.url, args.pincode, args.output, args.headless))
     else:
         asyncio.run(run_availability(args.input, args.pincode, args.output, args.workers))

@@ -15,116 +15,76 @@ class InstamartScraper(BaseScraper):
         self.base_url = "https://www.swiggy.com/instamart"
         self.delivery_eta = "N/A"
 
+    async def start(self):
+        await super().start()
+        # Resource blocking for performance
+        await self.page.route("**/*", self._handle_route)
+
+    async def _handle_route(self, route):
+        if route.request.resource_type in ["image", "media", "font"]:
+            await route.abort()
+        else:
+            await route.continue_()
+
     async def set_location(self, pincode: str):
         logger.info(f"Setting location to {pincode}")
         try:
             # Swiggy/Instamart specific location flow
             await self.page.goto(self.base_url, timeout=60000, wait_until='domcontentloaded')
-            await self.page.wait_for_timeout(5000) # Wait for splash to settle
-
-            # Debug: Snapshot initial state
-            await self.page.screenshot(path="debug_instamart_initial.png")
-            visible_text = await self.page.evaluate("document.body.innerText")
-            logger.info(f"Page Text Summary: {visible_text[:500].replace(chr(10), ' ')}")
-
-            # Debug: Analyze interactive elements
-            logger.info("Analyzing UI elements...")
-            elements = await self.page.evaluate('''() => {
-                const els = Array.from(document.querySelectorAll('button, a, span[role="button"]'));
-                return els.map(e => ({
-                    tag: e.tagName, 
-                    text: e.innerText.slice(0, 50).replace(/\\n/g, ' '), 
-                    aria: e.getAttribute('aria-label') || '',
-                    class: e.className
-                })).filter(e => e.text.length > 0 || e.aria.length > 0).slice(0, 20);
-            }''')
-            logger.info(f"UI Candidates: {json.dumps(elements, indent=2)}")
+            # Reduced initial wait
+            await self.page.wait_for_timeout(2000)
 
             # 1. Trigger Location Modal
             logger.info("Clicking location trigger...")
             try:
-                # Broad triggers based on common patterns
+                # Wait for any trigger with timeout
+                trigger_selector = "div[data-testid='header-location-container'], span:has-text('Setup your location'), span:has-text('Other'), span:has-text('Location'), button:has-text('Locate Me')" 
+                try:
+                    await self.page.wait_for_selector(trigger_selector, timeout=5000)
+                except: pass
+
+                # Attempt click strategies
                 triggers = [
                     "div[data-testid='header-location-container']",
                     "span:has-text('Setup your location')",
                     "span:has-text('Other')",
                     "span:has-text('Location')",
                     "button:has-text('Locate Me')",
-                    "div[class*='LocationHeader']",
-                    "a:has-text('Bangalore')",
-                    "a:has-text('Bengaluru')",
-                    "a:has-text('Delhi')",
-                    "a:has-text('Mumbai')"
+                    "div[class*='LocationHeader']"
                 ]
                 for t in triggers:
-                    try:
-                        if await self.page.is_visible(t):
-                            logger.info(f"Found trigger: {t}")
-                            await self.page.click(t, timeout=2000)
-                            await self.page.wait_for_timeout(1000)
-                            break
-                    except: continue
+                    if await self.page.is_visible(t):
+                        await self.page.click(t)
+                        break
             except Exception as e:
-                logger.error(f"Click trigger failed: {e}")
-                await self.page.screenshot(path="debug_instamart_trigger_fail.png")
+                logger.warning(f"Trigger click attempt failed: {e}")
 
             # 2. Type pincode
             logger.info("Typing pincode...")
+            search_input = "input[placeholder*='Search for area'], input[name='location'], input[data-testid='search-input'], input[class*='SearchInput']"
             
-            # Debug: Search input detection
-            search_inputs = [
-                "input[placeholder*='Search for area']", 
-                "input[name='location']", 
-                "input[type='text']",
-                "input[data-testid='search-input']",
-                "input[class*='SearchInput']",
-                "input[placeholder*='Enter location']"
-            ]
-            search_input = None
-            for s in search_inputs:
-                try:
-                    await self.page.wait_for_selector(s, timeout=2000)
-                    search_input = s
-                    break
-                except:
-                    continue
+            # Wait for input to be visible (modal open)
+            await self.page.wait_for_selector(search_input, state="visible", timeout=5000)
             
-            if not search_input:
-                logger.error("Could not find search input. Checking for inputs via evaluation...")
-                # Fallback: Find any visible input in the modal
-                try:
-                     search_input = await self.page.evaluate('''() => {
-                        const inputs = Array.from(document.querySelectorAll('input'));
-                        const visible = inputs.find(i => i.offsetParent !== null && i.type === 'text');
-                        return visible ? 'input[class="' + visible.className + '"]' : null;
-                     }''')
-                except:
-                    pass
+            # Find the specific valid input
+            valid_input = None
+            if await self.page.is_visible("input[data-testid='search-input']"):
+                valid_input = "input[data-testid='search-input']"
+            else:
+                valid_input = search_input # Playwright auto-selects first match
 
-            if not search_input:
-                logger.error("Could not find search input. Saving debug_location_modal.html...")
-                try:
-                    content = await self.page.content()
-                    with open("debug_location_modal.html", "w", encoding="utf-8") as f:
-                        f.write(content)
-                except:
-                    pass
-                logger.warning("Search input not found. Proceeding without location (ETA will be N/A).")
-                return # Soft fail to allow JSON-LD scraping to succeed
-
-            await self.page.fill(search_input, pincode)
+            await self.page.fill(valid_input, pincode)
             
             # 3. Wait for suggestions
             logger.info("Waiting for suggestions...")
-            suggestion = "div[data-testid='location-search-result'], div[class*='SearchResults'] div, div[role='button']"
+            suggestion = "div[data-testid='location-search-result'], div[class*='SearchResults'] div"
             await self.page.wait_for_selector(suggestion, timeout=10000)
             
             # Click first
-            await self.page.wait_for_timeout(1000)
             await self.page.click(f"{suggestion} >> nth=0")
             
-            # 4. Wait for redirect/reload
-            await self.page.wait_for_timeout(5000)
+            # 4. Wait for redirect/reload - wait for header ETA or URL change
+            await self.page.wait_for_timeout(3000) # Short buffer for transition
             
             # 5. Extract ETA from header
             try:
@@ -139,7 +99,10 @@ class InstamartScraper(BaseScraper):
             logger.info("Location set successfully")
             
         except Exception as e:
-            await self.page.screenshot(path="error_instamart_location.png")
+            logger.error(f"Error setting location: {e}")
+            try:
+                await self.page.screenshot(path="error_instamart_location.png")
+            except: pass
 
     async def scrape_delivery_eta(self):
         try:
@@ -181,7 +144,7 @@ class InstamartScraper(BaseScraper):
         try:
              # ... (navigation) ...
             await self.page.goto(category_url, timeout=60000, wait_until="domcontentloaded")
-            await self.page.wait_for_timeout(5000)
+            await self.page.wait_for_timeout(2000) # Reduced hydration wait
 
             # Dump Source
             content = await self.page.content()
