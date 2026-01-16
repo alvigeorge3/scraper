@@ -21,58 +21,72 @@ class BlinkitScraper(BaseScraper):
             await self.page.goto(self.base_url, timeout=60000, wait_until='domcontentloaded')
             
             # 1. Trigger Location Modal
-            # Blinkit header usually has "Delivery in X mins" or "Detecting location"
             logger.info("Clicking location trigger...")
-            location_trigger = None
             try:
-                # Try generic text or class that usually appears in header
-                await self.page.click("text=Delivery in", timeout=5000)
+                # Use robust class selectors found in debug HTML
+                # Class: LocationBar__Container... or LocationBar__EtaContainer...
+                await self.page.click("div[class*='LocationBar__']", timeout=5000)
             except:
                 try:
-                    await self.page.click("div[class*='LocationWidget']", timeout=2000)
+                     await self.page.click("text=Delivery in", timeout=2000)
                 except:
-                    # Fallback: exact text often found
-                    await self.page.click("text=Detecting location", timeout=2000)
+                     try:
+                        await self.page.click("text=Detecting location", timeout=2000)
+                     except:
+                        # Final fallback
+                        await self.page.click("header div[class*='Container']", timeout=2000)
 
             # Wait for modal
             await self.page.wait_for_timeout(2000) 
             
             # 2. Type pincode
             logger.info("Typing pincode...")
-            # Search input inside modal
-            await self.page.fill("input[name='search'], input[placeholder*='search']", pincode)
-            
-            # 3. Wait for and click result
-            logger.info("Waiting for suggestions...")
-            # Result items usually have specific class or just text matching pincode
-            await self.page.click(f"div[class*='LocationSearchList'] div:has-text('{pincode}')", timeout=10000)
-            
-            # Wait for location update
-            await self.page.wait_for_timeout(5000)
-            
-            # 4. Extract Delivery ETA from header
             try:
-                # Look for text like "Delivery in 8 minutes"
-                # It's usually in the same LocationWidget or near it
-                header_el = await self.page.query_selector("div[class*='LocationWidget']")
-                if header_el:
-                    text = await header_el.inner_text()
-                    # Clean up text to find "X minutes"
-                    # Example: "Blinkit\nDelivery in 8 minutes\nBengaluru"
-                    lines = text.split('\n')
-                    for line in lines:
-                        if "minutes" in line or "mins" in line:
-                            self.delivery_eta = line.strip()
-                            logger.info(f"Captured Delivery ETA: {self.delivery_eta}")
-                            break
+                # Search input inside modal
+                await self.page.fill("input[name='search'], input[placeholder*='search']", pincode)
+                
+                # 3. Wait for and click result
+                logger.info("Waiting for suggestions...")
+                # Result items usually have specific class or just text matching pincode
+                await self.page.click(f"div[class*='LocationSearchList'] div:has-text('{pincode}')", timeout=10000)
+                
+                # Wait for location update
+                await self.page.wait_for_timeout(5000)
+            except Exception as e:
+                logger.warning(f"Location input interaction failed: {e} - proceeding, maybe location already set?")
+            
+            # 4. Extract Delivery ETA
+            try:
+                # Look for "Delivery in X minutes" in LocationBar__Title...
+                eta_el = await self.page.query_selector("div[class*='LocationBar__Title']")
+                if eta_el:
+                    text = await eta_el.inner_text()
+                    # e.g. "Delivery in 13 minutes"
+                    match = re.search(r'(\d+\s*minutes?|mins?)', text, re.IGNORECASE)
+                    if match:
+                        self.delivery_eta = match.group(1).lower()
+                        logger.info(f"Captured Delivery ETA: {self.delivery_eta}")
+                    else:
+                        # Fallback scan
+                        self.delivery_eta = text # Capture full text if regex fails? No, keep N/A logic
+                        logger.info(f"ETA text found but regex failed: {text}")
             except Exception as e:
                 logger.warning(f"Could not extract ETA: {e}")
                 
             logger.info("Location set successfully")
             
+            # Debug: Save page source
+            content = await self.page.content()
+            with open("debug_blinkit_location.html", "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Saved debug_blinkit_location.html")
+            
         except Exception as e:
             logger.error(f"Error setting location: {e}")
             await self.page.screenshot(path="error_blinkit_location.png")
+            content = await self.page.content()
+            with open("debug_blinkit_location.html", "w", encoding="utf-8") as f:
+                f.write(content)
 
     async def scrape_assortment(self, category_url: str):
         logger.info(f"Scraping assortment from {category_url}")
@@ -93,7 +107,12 @@ class BlinkitScraper(BaseScraper):
             # 1. JSON Data Extraction Strategy (Primary)
             # We found that products start with {"product_id":...
             # We will use the robust JSONDecoder to parse them from the full content
+            # We will use the robust JSONDecoder to parse them from the full content
             content = await self.page.content()
+            with open("debug_blinkit_source.html", "w", encoding="utf-8") as f:
+                f.write(content)
+            logger.info("Saved debug_blinkit_source.html")
+            
             normalized_content = content.replace(r'\"', '"').replace(r'\\', '\\')
             
             import json
