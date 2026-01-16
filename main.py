@@ -7,6 +7,7 @@ import logging
 from scrapers.blinkit import BlinkitScraper
 from scrapers.zepto import ZeptoScraper
 from scrapers.instamart import InstamartScraper
+from database import db
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,6 +37,9 @@ async def run_assortment(platform: str, url: str, pincode: str, output_file: str
         filename = output_file if output_file else f"data/{platform}_assortment.csv"
         df.to_csv(filename, index=False)
         logger.info(f"Saved assortment to {filename}")
+
+        # Upload to Supabase
+        db.upsert_products(df, platform)
         
     finally:
         await scraper.stop()
@@ -75,6 +79,7 @@ async def run_availability(input_file: str, default_pincode: str, output_file: s
         if not url: continue
         
         domain = "blinkit" if "blinkit" in url else "zepto" if "zepto" in url else "swiggy" if "swiggy" in url else "unknown"
+
         
         if domain == "unknown":
             logger.warning(f"Unknown domain for {url}")
@@ -95,6 +100,7 @@ async def run_availability(input_file: str, default_pincode: str, output_file: s
         # Scrape
         data = await current_scraper.scrape_availability(url)
         data['input_pincode'] = pincode
+        data['platform'] = domain # Add platform for DB
         results.append(data)
         
     if current_scraper:
@@ -107,7 +113,12 @@ async def run_availability(input_file: str, default_pincode: str, output_file: s
              res_df.to_csv(final_output, index=False)
         else:
              res_df.to_excel(final_output, index=False)
+        else:
+             res_df.to_excel(final_output, index=False)
         logger.info(f"Saved availability results to {final_output}")
+
+        # Upload to Supabase
+        db.upsert_products(res_df)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Quick Commerce Scraper")
