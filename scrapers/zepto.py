@@ -30,8 +30,8 @@ class ZeptoScraper(BaseScraper):
                 # Fallback to looking for a header element that looks like a location selector
                 await self.page.click("header [class*='location'], header button[aria-label*='location']", timeout=5000)
 
-            # Wait for modal to open
-            await self.page.wait_for_timeout(2000)
+            # Wait for modal to open (smart wait)
+            await self.page.wait_for_selector("input[placeholder='Search a new address']", state="visible", timeout=5000)
 
             # 2. Type Pincode
             logger.info("Typing pincode...")
@@ -40,15 +40,16 @@ class ZeptoScraper(BaseScraper):
             await self.page.click(search_input_selector)
             # Clear input just in case
             await self.page.fill(search_input_selector, "")
-            await self.page.type(search_input_selector, pincode, delay=100)
+            await self.page.fill(search_input_selector, "")
+            # Reduce type delay for speed
+            await self.page.type(search_input_selector, pincode, delay=10)
             
             # 3. Wait for suggestions and select
             logger.info("Waiting for suggestions...")
             suggestion_selector = "div[data-testid='address-search-item']"
             try:
                 await self.page.wait_for_selector(suggestion_selector, timeout=10000)
-                # Small delay to ensure list populates
-                await self.page.wait_for_timeout(1000)
+                # Removed fixed 1000ms wait, relying on selector presence
                 
                 suggestions = await self.page.query_selector_all(suggestion_selector)
                 if suggestions:
@@ -60,17 +61,18 @@ class ZeptoScraper(BaseScraper):
             except Exception as e:
                 logger.error(f"Error selecting suggestion: {e}")
 
-            # 4. Confirm Location (if applicable)
-            logger.info("Checking for confirm button...")
-            try:
-                confirm_btn_selector = "button[data-testid='confirm-location-button']"
-                # Short timeout as it might not appear
                 await self.page.wait_for_selector(confirm_btn_selector, timeout=5000)
                 await self.page.click(confirm_btn_selector)
             except:
-                logger.info("No confirm button found or needed")
+                logger.debug("No confirm button found or needed")
 
-            await self.page.wait_for_timeout(3000)
+            # Replace fixed wait with checking for location update in header or eta element
+            try:
+                # Wait for the location text to NOT be "Select Location" or similar, or wait for ETA
+                # Simplest check: wait for ETA element which appears after location is set
+                await self.page.wait_for_selector('[data-testid="delivery-time"], header', timeout=5000)
+            except:
+                pass
             
             # 4. Extract ETA
             try:

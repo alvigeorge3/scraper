@@ -44,7 +44,7 @@ async def run_assortment(platform: str, url: str, pincode: str, output_file: str
     finally:
         await scraper.stop()
 
-async def run_availability(input_file: str, default_pincode: str, output_file: str = None):
+async def run_availability(input_file: str, default_pincode: str, output_file: str = None, workers: int = 1):
     logger.info(f"Reading availability input from {input_file}")
     try:
         if input_file.endswith('.csv'):
@@ -55,64 +55,60 @@ async def run_availability(input_file: str, default_pincode: str, output_file: s
         logger.error(f"Error reading input file: {e}")
         return
 
-    results = []
+    # Semaphore to control concurrency
+    sem = asyncio.Semaphore(workers)
     
-    # helper to get scraper
-    def get_scraper(url):
-        if "blinkit.com" in url: return BlinkitScraper(headless=False)
-        if "zepto.co" in url: return ZeptoScraper(headless=False)
-        if "swiggy.com" in url: return InstamartScraper(headless=False)
+    # Helper to get scraper class
+    def get_scraper_cls(url):
+        if "blinkit.com" in url: return BlinkitScraper
+        if "zepto" in url: return ZeptoScraper
+        if "swiggy.com" in url: return InstamartScraper
         return None
 
-    # Group by pincode/scraper to reuse session if possible, but for simplicity iterate
-    # Ideally should sort by pincode to minimize location switches
+    async def process_row(row):
+        async with sem:
+            url = row.get('url') or row.get('Product Link') or row.get('Product URL')
+            pincode = str(row.get('pincode') or row.get('Pincode') or default_pincode)
+            
+            if not url: return None
+
+            ScraperCls = get_scraper_cls(url)
+            if not ScraperCls:
+                logger.warning(f"Unknown domain for {url}")
+                return None
+            
+            # Headless should be True for high concurrency to save resources
+            headless = True if workers > 1 else False
+            scraper = ScraperCls(headless=headless)
+            
+            try:
+                await scraper.start()
+                await scraper.set_location(pincode)
+                data = await scraper.scrape_availability(url)
+                data['input_pincode'] = pincode
+                d_lower = url.lower()
+                data['platform'] = "blinkit" if "blinkit" in d_lower else "zepto" if "zepto" in d_lower else "instamart"
+                return data
+            except Exception as e:
+                logger.error(f"Error processing {url}: {e}")
+                return None
+            finally:
+                await scraper.stop()
+
+    logger.info(f"Starting scraping with {workers} workers...")
     
-    current_scraper = None
-    current_pincode = None
-    last_domain = None
-
+    tasks = []
     for index, row in df.iterrows():
-        # normalize column names check
-        url = row.get('url') or row.get('Product Link') or row.get('Product URL')
-        pincode = str(row.get('pincode') or row.get('Pincode') or default_pincode)
+        tasks.append(process_row(row))
         
-        if not url: continue
-        
-        domain = "blinkit" if "blinkit" in url else "zepto" if "zepto" in url else "swiggy" if "swiggy" in url else "unknown"
-
-        
-        if domain == "unknown":
-            logger.warning(f"Unknown domain for {url}")
-            continue
-
-        # Manage scraper lifecycle
-        if current_scraper and (domain != last_domain or pincode != current_pincode):
-            await current_scraper.stop()
-            current_scraper = None
-            
-        if not current_scraper:
-            current_scraper = get_scraper(url)
-            await current_scraper.start()
-            await current_scraper.set_location(pincode)
-            current_pincode = pincode
-            last_domain = domain
-            
-        # Scrape
-        data = await current_scraper.scrape_availability(url)
-        data['input_pincode'] = pincode
-        data['platform'] = domain # Add platform for DB
-        results.append(data)
-        
-    if current_scraper:
-        await current_scraper.stop()
+    results = await asyncio.gather(*tasks)
+    results = [r for r in results if r is not None]
 
     if results:
         res_df = pd.DataFrame(results)
         final_output = output_file if output_file else "data/availability_results.xlsx"
         if final_output.endswith('.csv'):
              res_df.to_csv(final_output, index=False)
-        else:
-             res_df.to_excel(final_output, index=False)
         else:
              res_df.to_excel(final_output, index=False)
         logger.info(f"Saved availability results to {final_output}")
@@ -128,6 +124,7 @@ if __name__ == "__main__":
     parser.add_argument("--pincode", default="560001")
     parser.add_argument("--input", help="Input Excel file for availability")
     
+    parser.add_argument("--workers", type=int, default=1, help="Number of concurrent workers for availability check")
     parser.add_argument("--output", help="Output CSV filename")
     
     args = parser.parse_args()
@@ -138,4 +135,4 @@ if __name__ == "__main__":
         else:
             asyncio.run(run_assortment(args.platform, args.url, args.pincode, args.output))
     else:
-        asyncio.run(run_availability(args.input, args.pincode, args.output))
+        asyncio.run(run_availability(args.input, args.pincode, args.output, args.workers))
